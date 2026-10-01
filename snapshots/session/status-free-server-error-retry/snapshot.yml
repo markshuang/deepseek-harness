@@ -1,0 +1,10 @@
+version: 1
+scenario: status-free-server-error-retry
+profile: headless
+composition: status-free-server-error-retry
+recording: authored
+header:
+  class: status-free-server-error-retry
+  pin: true
+  systemPromptSource: status-free-server-error-retry
+  toolSchemasSource: status-free-server-error-retry

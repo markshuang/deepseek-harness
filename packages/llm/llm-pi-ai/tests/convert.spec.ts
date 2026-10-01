@@ -882,6 +882,20 @@ describe('mapStopReason / mapUsage', () => {
     }))).toMatchObject({ kind: 'error', failure: { code: 'QUOTA' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 500: backend down' })))
       .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'The server had an error processing your request' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+    for (const errorMessage of [
+      'Internal Server Error',
+      'Service Unavailable',
+      'Bad Gateway',
+      'Provider temporarily overloaded',
+      'Provider temporarily unavailable',
+    ]) {
+      expect(mapStopReason(assistant({ stopReason: 'error', errorMessage })))
+        .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+    }
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'Gateway Timeout' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'provider timed out' })))
       .toMatchObject({ kind: 'error', failure: { code: 'TIMEOUT' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'ECONNRESET socket closed' })))
@@ -908,6 +922,8 @@ describe('mapStopReason / mapUsage', () => {
       stopReason: 'error',
       errorMessage: 'vector length limit exceeded',
     }))).toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
+    expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'The selected feature is temporarily unavailable' })))
+      .toMatchObject({ kind: 'error', failure: { code: 'PI_AI_ERROR' } })
   })
 
   it.each([
