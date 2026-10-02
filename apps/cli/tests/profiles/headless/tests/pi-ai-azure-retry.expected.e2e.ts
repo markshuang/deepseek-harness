@@ -39,6 +39,10 @@ async function persistedEvents(cwd: string): Promise<JsonRecord[]> {
   return content.split(/\r?\n/).filter(Boolean).map(line => recordOf(JSON.parse(line)))
 }
 
+function serializeSseEvents(events: readonly unknown[]): string {
+  return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+}
+
 function responseSse(): string {
   const item = {
     id: 'msg_retry_recovered',
@@ -93,7 +97,7 @@ function responseSse(): string {
       },
     },
   ]
-  return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+  return serializeSseEvents(events)
 }
 
 function responseFailedSse(attempt: number): string {
@@ -109,11 +113,11 @@ function responseFailedSse(attempt: number): string {
       },
     },
   ]
-  return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+  return serializeSseEvents(events)
 }
 
 async function startAzureResponsesFixture(
-  failureMode: 'http-status' | 'status-free' = 'http-status',
+  failureMode: 'http-status' | 'status-free' | 'status-free-exhaustion' = 'http-status',
 ): Promise<AzureResponsesFixture> {
   const taskBodies: string[] = []
   const taskPaths: string[] = []
@@ -129,8 +133,8 @@ async function startAzureResponsesFixture(
       if (taskRequest) {
         taskBodies.push(body)
         taskPaths.push(request.url ?? '')
-        const failedAttempt = taskBodies.length <= 2
-        if (failureMode === 'status-free' && failedAttempt) {
+        const failedAttempt = failureMode === 'status-free-exhaustion' || taskBodies.length <= 2
+        if (failureMode !== 'http-status' && failedAttempt) {
           taskStatuses.push(200)
           response.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
           response.end(responseFailedSse(taskBodies.length))
@@ -179,8 +183,7 @@ async function startAzureResponsesFixture(
   }
 }
 
-async function assertPersistedRetryRecovery(cwd: string): Promise<void> {
-  const records = await persistedEvents(cwd)
+function assertPersistedRetryEvents(records: JsonRecord[]): void {
   const retryRecords = records.filter(record => record.type === 'llm/retry')
   const retryData = retryRecords.map(record => recordOf(record.data))
   expect(retryData).toHaveLength(2)
@@ -211,9 +214,28 @@ async function assertPersistedRetryRecovery(cwd: string): Promise<void> {
   expect(started.map(data => data.retry)).toEqual([1, 2])
   expect(started.map(data => data.retryId)).toEqual(retryData.map(data => data.retryId))
   expect(records.filter(record => typeof record.type === 'string' && record.type.startsWith('tool/'))).toHaveLength(0)
+}
+
+async function assertPersistedRetryRecovery(cwd: string): Promise<void> {
+  const records = await persistedEvents(cwd)
+  assertPersistedRetryEvents(records)
   const assistantMessages = records.filter(record => record.type === 'assistant/message')
   expect(assistantMessages).toHaveLength(1)
   expect(JSON.stringify(assistantMessages[0]?.data)).toContain(recoveredText)
+}
+
+async function assertPersistedRetryExhaustion(cwd: string): Promise<void> {
+  const records = await persistedEvents(cwd)
+  assertPersistedRetryEvents(records)
+  expect(records.filter(record => record.type === 'assistant/message')).toHaveLength(0)
+  const turnEnd = records.filter(record => record.type === 'turn/end').at(-1)
+  if (turnEnd === undefined) throw new Error('expected the exhausted turn to persist turn/end')
+  const endData = recordOf(turnEnd.data)
+  const reason = recordOf(endData.reason)
+  expect(reason.kind).toBe('error')
+  const terminalFailure = recordOf(reason.error)
+  expect(terminalFailure).toMatchObject({ code: 'SERVER' })
+  expect(terminalFailure.message).toContain(serverErrorMessage)
 }
 
 let activeServer: AzureResponsesFixture | undefined
@@ -224,14 +246,13 @@ afterEach(async () => {
   await server?.close()
 })
 
-async function expectRetryRecovery(
-  failureMode: 'http-status' | 'status-free',
-  expectedStatuses: readonly number[],
-): Promise<void> {
-  const server = await startAzureResponsesFixture(failureMode)
-  activeServer = server
-  const result = await runLoaderSmoke({
-    label: `pi-ai Azure retry (${failureMode}) through built headless CLI`,
+async function runAzureRetryCli(
+  server: AzureResponsesFixture,
+  expectedExitCode: number,
+  inspect: (cwd: string) => Promise<void>,
+) {
+  return runLoaderSmoke({
+    label: 'pi-ai Azure retry through built headless CLI',
     tempDirPrefix: 'dsh-pi-ai-azure-retry-',
     binScript,
     libBinScript,
@@ -241,24 +262,42 @@ async function expectRetryRecovery(
     tsconfigPath,
     // Add cold/parallel headroom beyond the shared smoke window for this CLI path.
     processTimeoutMs: 2 * LOADER_SMOKE_TEST_TIMEOUT_MS,
+    expectedExitCode,
     env: {
       DSH_PI_AI_RETRY_BASE_URL: server.url,
       DSH_PI_AI_RETRY_TEST_KEY: 'key-for-local-test-only',
       DSH_PERMISSION_MODE: 'danger-full-access',
       DSH_TELEMETRY_DISABLED: '1',
     },
-    inspect: assertPersistedRetryRecovery,
+    inspect,
   })
+}
 
-  expect(result.stderr).toBe('')
+function assertAzureTaskRequests(server: AzureResponsesFixture, expectedStatuses: readonly number[]): void {
   expect(server.taskStatuses).toEqual(expectedStatuses)
-  expect(server.taskBodies).toHaveLength(3)
-  expect(server.taskBodies.map(body => recordOf(JSON.parse(body)).model)).toEqual([
-    'gpt-6-luna',
-    'gpt-6-luna',
-    'gpt-6-luna',
-  ])
+  expect(server.taskBodies).toHaveLength(expectedStatuses.length)
+  expect(server.taskBodies.map(body => recordOf(JSON.parse(body)).model)).toEqual(
+    expectedStatuses.map(() => 'gpt-6-luna'),
+  )
   expect(server.taskPaths.every(path => path.toLowerCase().includes('responses'))).toBe(true)
+}
+
+async function expectRetryRecovery(
+  failureMode: 'http-status' | 'status-free',
+  expectedStatuses: readonly number[],
+): Promise<void> {
+  const server = await startAzureResponsesFixture(failureMode)
+  activeServer = server
+  const result = await runAzureRetryCli(server, 0, assertPersistedRetryRecovery)
+  expect(result.stderr).toBe('')
+  assertAzureTaskRequests(server, expectedStatuses)
+}
+
+async function expectRetryExhaustion(): Promise<void> {
+  const server = await startAzureResponsesFixture('status-free-exhaustion')
+  activeServer = server
+  await runAzureRetryCli(server, 1, assertPersistedRetryExhaustion)
+  assertAzureTaskRequests(server, [200, 200, 200])
 }
 
 it('recovers through the real pi-ai route after two HTTP 500 failures', async () => {
@@ -267,4 +306,8 @@ it('recovers through the real pi-ai route after two HTTP 500 failures', async ()
 
 it('recovers through the real pi-ai route after two status-free response.failed events', async () => {
   await expectRetryRecovery('status-free', [200, 200, 200])
+}, 120_000)
+
+it('exhausts the bounded retry budget for status-free response.failed server errors', async () => {
+  await expectRetryExhaustion()
 }, 120_000)
