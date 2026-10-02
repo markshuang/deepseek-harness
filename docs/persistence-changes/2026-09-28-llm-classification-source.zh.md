@@ -9,7 +9,7 @@ kind: persistence-change
 
 ## 概述
 
-为持久化的 assistant-attempt、retry 与终态错误证据增加可选的 LlmFailure.classificationSource 来源字段。
+为持久化的 assistant-attempt、retry 与终态错误证据增加可选字段 `LlmFailure.classificationSource`。
 
 ## 目录
 

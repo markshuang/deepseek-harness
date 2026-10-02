@@ -9,7 +9,7 @@ English | [中文](2026-09-28-llm-classification-source.zh.md)
 
 ## Summary
 
-Adds optional LlmFailure.classificationSource provenance to persisted assistant-attempt, retry, and terminal-error evidence.
+Adds the optional `LlmFailure.classificationSource` field to persisted assistant-attempt, retry, and terminal-error evidence.
 
 ## Table of Contents
 
