@@ -29,6 +29,18 @@ describe('adapter failure normalization', () => {
     expect(normalizeLlmFailure(primitiveFailure)).toEqual({ message: 'provider failed', code: 'UNKNOWN' })
   })
 
+  it('preserves an adapter classification source in the normalized failure snapshot', () => {
+    const error = Object.assign(new Error('provider failed'), {
+      code: 'SERVER',
+      failure: { message: 'provider failed', code: 'SERVER', classificationSource: 'pi-ai-error-message' },
+    })
+    expect(normalizeLlmFailure(error)).toEqual({
+      message: 'provider failed',
+      code: 'SERVER',
+      classificationSource: 'pi-ai-error-message',
+    })
+  })
+
   it('contains hostile Error property reflection', () => {
     const withFailure = new Error('provider failed') as Error & { failure: unknown; code: string }
     withFailure.failure = { message: 'provider failed', code: 'FOREIGN' }

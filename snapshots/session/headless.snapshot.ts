@@ -1077,6 +1077,15 @@ describe('headless recorded-session snapshots', () => {
       || mode === 'record' && scenario.manifest.recording === 'authored'
       || mode === 'record' && scenario.manifest.sessionFormat !== undefined
     const scenarioTest = skipped ? it.skip : mode === 'replay' ? it.concurrent : it
+    // Give the cold source-loader retry replay its longer process window plus cleanup.
+    const scenarioProcessTimeoutMs = scenario.name === 'status-free-server-error-retry'
+      ? 2 * LOADER_SMOKE_TEST_TIMEOUT_MS
+      : undefined
+    const scenarioTestTimeoutMs = scenario.name === 'provider-cwd'
+      ? 3 * LOADER_SMOKE_TEST_TIMEOUT_MS
+      : scenarioProcessTimeoutMs === undefined
+        ? LOADER_SMOKE_TEST_TIMEOUT_MS
+        : scenarioProcessTimeoutMs + 30_000
     const inputLabel = retainedToolInput === undefined ? '' : ' from retained V3 input'
     scenarioTest(`${mode}s ${scenario.name}${inputLabel} through dsh --profile headless`, async () => {
       let fixtureFiles = retainedToolInput === undefined
@@ -1118,6 +1127,8 @@ describe('headless recorded-session snapshots', () => {
       try {
         result = await runLoaderSmoke({
           label: `${scenario.name} headless snapshot`,
+          // Use the same scenario selector as the enclosing Vitest timeout.
+          ...(scenarioProcessTimeoutMs === undefined ? {} : { processTimeoutMs: scenarioProcessTimeoutMs }),
           tempDirPrefix: 'dsh-log-snap-',
           ...(scenario.manifest.workspace?.parent === 'outside-temp' ? { tempDirParent: outsideTempWorkspaceParent() } : {}),
           binScript: dshBin,
@@ -1276,6 +1287,6 @@ describe('headless recorded-session snapshots', () => {
       } else {
         expect(finalWorkspace, `${scenario.name}: a changed workspace requires workspace.final`).toEqual(initialWorkspace)
       }
-    }, scenario.name === 'provider-cwd' ? 3 * LOADER_SMOKE_TEST_TIMEOUT_MS : LOADER_SMOKE_TEST_TIMEOUT_MS)
+    }, scenarioTestTimeoutMs)
   }
 })

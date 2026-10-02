@@ -1,0 +1,36 @@
+# Test-only real pi-ai Azure route. The endpoint fails closed to loopback if the
+# test URL is absent; retry settings are short and are not production policy.
+- id: llm-deepseek
+  disabled: true
+
+- id: llm-pi-ai
+  config:
+    providers:
+      azure-openai-responses:
+        apiKeyEnv: DSH_PI_AI_RETRY_TEST_KEY
+        api: openai-responses
+        baseURL: !!js process.env.DSH_PI_AI_RETRY_BASE_URL || 'http://127.0.0.1:1'
+        models:
+          - id: gpt-6-luna
+            input: [text]
+        retryPolicy:
+          mode: normal
+          maxRetries: 2
+          backoff:
+            initialDelayMs: 1
+            maxDelayMs: 1
+            jitterRatio: 0
+        streamIdleTimeoutMs: 3000
+
+- id: agent-default-model
+  config:
+    provider: azure-openai-responses
+    model: gpt-6-luna
+
+- id: agent-instructions
+  disabled: true
+
+- id: session-persistence-jsonl
+  config:
+    root: './.sessions'
+    compression: none

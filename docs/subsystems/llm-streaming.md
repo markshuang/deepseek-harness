@@ -228,7 +228,7 @@ Process-local `agent/assistant-stream` frames carry live presentation. Durable r
 
 ## `LlmFailure`
 
-Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics.
+Every thrown or in-band final-adapter failure normalizes to one serializable provider-neutral payload. `providerRetryAfterMs` is a validated positive delay requested by the provider, not a retry decision; `ProviderRequestId` is an opaque branded string for diagnostics. When an adapter can identify it, `classificationSource` records the evidence source used for the classification.
 
 ```ts type-equiv
 /** Serializable provider or transport failure facts; policy decides whether they are retryable. */
@@ -237,6 +237,8 @@ interface LlmFailure {
   readonly message: string
   /** Stable provider-neutral machine-routing code. */
   readonly code: string
+  /** Source used to classify provider evidence, when an adapter can identify it. */
+  readonly classificationSource?: string
   /** HTTP status returned by the provider, when available. */
   readonly status?: number
   /** Provider-requested delay in milliseconds, when valid and available. */

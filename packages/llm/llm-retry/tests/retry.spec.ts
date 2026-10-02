@@ -118,7 +118,7 @@ async function harness(
     retry.apply(inner, {}, internals)
   }, { inject: retry.inject }))
   await ctx.plugin(AgentLoop, { agents: [] })
-  const disposeAdapter = ctx.llm.registerAdapter(['mock', 'other'], adapter)
+  const disposeAdapter = ctx.llm.registerAdapter(['mock', 'other', 'azure-openai-responses'], adapter)
   return { ctx, retryFiber, disposeAdapter }
 }
 
@@ -175,6 +175,22 @@ afterEach(async () => {
 })
 
 describe('provider-routed retry policy', () => {
+  it('leaves an ordinary successful call unchanged without retry events', async () => {
+    const adapter = new ScriptedAdapter([textResponse('ordinary success')])
+    ;({ ctx: context } = await harness(adapter))
+    const agent = await context.agentLoop.create(SessionId('retry-ordinary-success'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(context, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ordinary success' }],
+    })
+  })
+
   it('records the scheduled delay before retrying the request', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
@@ -222,6 +238,67 @@ describe('provider-routed retry policy', () => {
       role: 'assistant',
       content: [{ type: 'text', text: 'done' }],
       source: { kind: 'model', provider: 'mock', model: 'mock' },
+    })
+  })
+
+  it('automatically recovers twice from the observed Azure server wording in one work step', async () => {
+    vi.useFakeTimers()
+    // The paired convert.spec regression proves this exact pi-ai message maps to SERVER.
+    const azureError = 'The server had an error processing your request'
+    const failure = (): StreamChunk[] => [
+      { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } },
+      { type: 'finish', reason: { kind: 'error', failure: { message: azureError, code: 'SERVER', classificationSource: 'pi-ai-error-message' } } },
+    ]
+    const adapter = new ScriptedAdapter([failure(), failure(), textResponse('recovered without continue')])
+    ;({ ctx: context } = await harness(adapter, { 'azure-openai-responses': normalConfig({ maxRetries: 5 }) }))
+    const agent = await context.agentLoop.create(SessionId('azure-retry-success'), {
+      provider: 'azure-openai-responses',
+      model: 'gpt-6-luna',
+    })
+    const firstRetry = waitForRetry(context, agent, 1)
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    expect((await firstRetry).data).toMatchObject({
+      provider: 'azure-openai-responses',
+      retry: 1,
+      maxRetries: 5,
+      delayMs: 500,
+      failure: { message: azureError, code: 'SERVER', classificationSource: 'pi-ai-error-message' },
+    })
+
+    const secondRetry = waitForRetry(context, agent, 2)
+    await vi.advanceTimersByTimeAsync(500)
+    expect((await secondRetry).data).toMatchObject({ retry: 2, delayMs: 1_000 })
+    const idle = waitForIdle(context, agent)
+    await vi.advanceTimersByTimeAsync(1_000)
+    await idle
+
+    expect(adapter.requests).toHaveLength(3)
+    expect(adapter.requests[0]).toEqual(adapter.requests[1])
+    expect(adapter.requests[1]).toEqual(adapter.requests[2])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'llm/retry')).toHaveLength(2)
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'step/start').map(event => event.data))
+      .toEqual([{ turn: 1, step: 1 }])
+    expect(agent.session.snapshotEvents().filter(event => event.type === 'assistant/message')).toHaveLength(1)
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'recovered without continue' }],
+      source: { kind: 'model', provider: 'azure-openai-responses', model: 'gpt-6-luna' },
+    })
+  })
+
+  it('keeps unknown PI_AI_ERROR terminal under the normal retry policy', async () => {
+    const adapter = new ScriptedAdapter([new LlmError('unclassified provider failure', 'PI_AI_ERROR')])
+    ;({ ctx: context } = await harness(adapter))
+    const agent = await context.agentLoop.create(SessionId('retry-unknown-pi-ai-error'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(context, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.snapshotEvents().at(-1)).toMatchObject({
+      type: 'turn/end',
+      data: { reason: { kind: 'error', error: { message: 'unclassified provider failure', code: 'PI_AI_ERROR' } } },
     })
   })
 
