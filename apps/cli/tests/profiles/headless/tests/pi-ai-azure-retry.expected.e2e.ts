@@ -2,7 +2,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { createServer, type Server } from 'node:http'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { expect, it } from 'vitest'
+import { afterEach, expect, it } from 'vitest'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 
 const binScript = fileURLToPath(new URL('../../../../src/bin.ts', import.meta.url))
@@ -96,7 +96,25 @@ function responseSse(): string {
   return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
 }
 
-async function startAzureResponsesFixture(): Promise<AzureResponsesFixture> {
+function responseFailedSse(attempt: number): string {
+  const responseId = `resp_retry_failed_${attempt}`
+  const events = [
+    { type: 'response.created', response: { id: responseId } },
+    {
+      type: 'response.failed',
+      response: {
+        id: responseId,
+        status: 'failed',
+        error: { code: 'server_error', type: 'server_error', message: serverErrorMessage },
+      },
+    },
+  ]
+  return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('')
+}
+
+async function startAzureResponsesFixture(
+  failureMode: 'http-status' | 'status-free' = 'http-status',
+): Promise<AzureResponsesFixture> {
   const taskBodies: string[] = []
   const taskPaths: string[] = []
   const taskStatuses: number[] = []
@@ -111,7 +129,16 @@ async function startAzureResponsesFixture(): Promise<AzureResponsesFixture> {
       if (taskRequest) {
         taskBodies.push(body)
         taskPaths.push(request.url ?? '')
-        const status = taskStatuses.length < 2 ? 500 : 200
+        const failedAttempt = taskBodies.length <= 2
+        if (failureMode === 'status-free' && failedAttempt) {
+          taskStatuses.push(200)
+          response.writeHead(200, { 'content-type': 'text/event-stream', connection: 'close' })
+          response.end(responseFailedSse(taskBodies.length))
+          return
+        }
+        const status = failureMode === 'http-status' && failedAttempt
+          ? 500
+          : 200
         taskStatuses.push(status)
         if (status === 500) {
           response.writeHead(status, { 'content-type': 'application/json', connection: 'close' })
@@ -152,75 +179,92 @@ async function startAzureResponsesFixture(): Promise<AzureResponsesFixture> {
   }
 }
 
-it('routes the exact Azure server error through pi-ai, one retry owner, and session persistence', async () => {
-  const server = await startAzureResponsesFixture()
-  try {
-    const result = await runLoaderSmoke({
-      label: 'pi-ai Azure retry through built headless CLI',
-      tempDirPrefix: 'dsh-pi-ai-azure-retry-',
-      binScript,
-      libBinScript,
-      mode: 'lib',
-      configPath: profilePatch,
-      binArgs: ['--profile', 'headless', '--patch', profilePatch, testPrompt],
-      tsconfigPath,
-      // Add cold/parallel headroom beyond the shared smoke window for this CLI path.
-      processTimeoutMs: 2 * LOADER_SMOKE_TEST_TIMEOUT_MS,
-      env: {
-        DSH_PI_AI_RETRY_BASE_URL: server.url,
-        DSH_PI_AI_RETRY_TEST_KEY: 'key-for-local-test-only',
-        DSH_PERMISSION_MODE: 'danger-full-access',
-        DSH_TELEMETRY_DISABLED: '1',
-      },
-      inspect: async (cwd) => {
-        const records = await persistedEvents(cwd)
-        const retryRecords = records.filter(record => record.type === 'llm/retry')
-        const retryData = retryRecords.map(record => recordOf(record.data))
-        expect(retryData).toHaveLength(2)
-        expect(retryData.map(data => data.retry)).toEqual([1, 2])
-        expect(typeof retryData[0]?.turn).toBe('number')
-        expect(typeof retryData[0]?.step).toBe('number')
-        expect(retryData[1]).toMatchObject({
-          turn: retryData[0]?.turn,
-          step: retryData[0]?.step,
-        })
-        for (const data of retryData) {
-          expect(data).toMatchObject({
-            provider: 'azure-openai-responses',
-            mode: 'normal',
-            maxRetries: 2,
-            delayMs: 1,
-            failure: {
-              code: 'SERVER',
-              classificationSource: 'pi-ai-error-message',
-            },
-          })
-          expect(JSON.stringify(data.failure)).toContain(serverErrorMessage)
-        }
-
-        const started = records
-          .filter(record => record.type === 'llm/retry-started')
-          .map(record => recordOf(record.data))
-        expect(started).toHaveLength(2)
-        expect(started.map(data => data.retry)).toEqual([1, 2])
-        expect(started.map(data => data.retryId)).toEqual(retryData.map(data => data.retryId))
-
-        const assistantMessages = records.filter(record => record.type === 'assistant/message')
-        expect(assistantMessages).toHaveLength(1)
-        expect(JSON.stringify(assistantMessages[0]?.data)).toContain(recoveredText)
+async function assertPersistedRetryRecovery(cwd: string): Promise<void> {
+  const records = await persistedEvents(cwd)
+  const retryRecords = records.filter(record => record.type === 'llm/retry')
+  const retryData = retryRecords.map(record => recordOf(record.data))
+  expect(retryData).toHaveLength(2)
+  expect(retryData.map(data => data.retry)).toEqual([1, 2])
+  expect(typeof retryData[0]?.turn).toBe('number')
+  expect(typeof retryData[0]?.step).toBe('number')
+  expect(retryData[1]).toMatchObject({
+    turn: retryData[0]?.turn,
+    step: retryData[0]?.step,
+  })
+  for (const data of retryData) {
+    expect(data).toMatchObject({
+      provider: 'azure-openai-responses',
+      mode: 'normal',
+      maxRetries: 2,
+      delayMs: 1,
+      failure: {
+        code: 'SERVER',
+        classificationSource: 'pi-ai-error-message',
       },
     })
-
-    expect(result.stderr).toBe('')
-    expect(server.taskStatuses).toEqual([500, 500, 200])
-    expect(server.taskBodies).toHaveLength(3)
-    expect(server.taskBodies.map(body => recordOf(JSON.parse(body)).model)).toEqual([
-      'gpt-6-luna',
-      'gpt-6-luna',
-      'gpt-6-luna',
-    ])
-    expect(server.taskPaths.every(path => path.toLowerCase().includes('responses'))).toBe(true)
-  } finally {
-    await server.close()
+    expect(JSON.stringify(data.failure)).toContain(serverErrorMessage)
   }
+  const started = records
+    .filter(record => record.type === 'llm/retry-started')
+    .map(record => recordOf(record.data))
+  expect(started).toHaveLength(2)
+  expect(started.map(data => data.retry)).toEqual([1, 2])
+  expect(started.map(data => data.retryId)).toEqual(retryData.map(data => data.retryId))
+  expect(records.filter(record => typeof record.type === 'string' && record.type.startsWith('tool/'))).toHaveLength(0)
+  const assistantMessages = records.filter(record => record.type === 'assistant/message')
+  expect(assistantMessages).toHaveLength(1)
+  expect(JSON.stringify(assistantMessages[0]?.data)).toContain(recoveredText)
+}
+
+let activeServer: AzureResponsesFixture | undefined
+
+afterEach(async () => {
+  const server = activeServer
+  activeServer = undefined
+  await server?.close()
+})
+
+async function expectRetryRecovery(
+  failureMode: 'http-status' | 'status-free',
+  expectedStatuses: readonly number[],
+): Promise<void> {
+  const server = await startAzureResponsesFixture(failureMode)
+  activeServer = server
+  const result = await runLoaderSmoke({
+    label: `pi-ai Azure retry (${failureMode}) through built headless CLI`,
+    tempDirPrefix: 'dsh-pi-ai-azure-retry-',
+    binScript,
+    libBinScript,
+    mode: 'lib',
+    configPath: profilePatch,
+    binArgs: ['--profile', 'headless', '--patch', profilePatch, testPrompt],
+    tsconfigPath,
+    // Add cold/parallel headroom beyond the shared smoke window for this CLI path.
+    processTimeoutMs: 2 * LOADER_SMOKE_TEST_TIMEOUT_MS,
+    env: {
+      DSH_PI_AI_RETRY_BASE_URL: server.url,
+      DSH_PI_AI_RETRY_TEST_KEY: 'key-for-local-test-only',
+      DSH_PERMISSION_MODE: 'danger-full-access',
+      DSH_TELEMETRY_DISABLED: '1',
+    },
+    inspect: assertPersistedRetryRecovery,
+  })
+
+  expect(result.stderr).toBe('')
+  expect(server.taskStatuses).toEqual(expectedStatuses)
+  expect(server.taskBodies).toHaveLength(3)
+  expect(server.taskBodies.map(body => recordOf(JSON.parse(body)).model)).toEqual([
+    'gpt-6-luna',
+    'gpt-6-luna',
+    'gpt-6-luna',
+  ])
+  expect(server.taskPaths.every(path => path.toLowerCase().includes('responses'))).toBe(true)
+}
+
+it('recovers through the real pi-ai route after two HTTP 500 failures', async () => {
+  await expectRetryRecovery('http-status', [500, 500, 200])
+}, 120_000)
+
+it('recovers through the real pi-ai route after two status-free response.failed events', async () => {
+  await expectRetryRecovery('status-free', [200, 200, 200])
 }, 120_000)
