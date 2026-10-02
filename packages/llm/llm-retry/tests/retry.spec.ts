@@ -175,6 +175,22 @@ afterEach(async () => {
 })
 
 describe('provider-routed retry policy', () => {
+  it('leaves an ordinary successful call unchanged without retry events', async () => {
+    const adapter = new ScriptedAdapter([textResponse('ordinary success')])
+    ;({ ctx: context } = await harness(adapter))
+    const agent = await context.agentLoop.create(SessionId('retry-ordinary-success'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(context, agent)
+
+    expect(adapter.requests).toHaveLength(1)
+    expect(agent.session.snapshotEvents().some(event => event.type === 'llm/retry')).toBe(false)
+    expect(agent.session.deriveMessages().at(-1)).toMatchObject({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ordinary success' }],
+    })
+  })
+
   it('records the scheduled delay before retrying the request', async () => {
     vi.useFakeTimers()
     const adapter = new ScriptedAdapter([
@@ -231,7 +247,7 @@ describe('provider-routed retry policy', () => {
     const azureError = 'The server had an error processing your request'
     const failure = (): StreamChunk[] => [
       { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } },
-      { type: 'finish', reason: { kind: 'error', failure: { message: azureError, code: 'SERVER' } } },
+      { type: 'finish', reason: { kind: 'error', failure: { message: azureError, code: 'SERVER', classificationSource: 'pi-ai-error-message' } } },
     ]
     const adapter = new ScriptedAdapter([failure(), failure(), textResponse('recovered without continue')])
     ;({ ctx: context } = await harness(adapter, { 'azure-openai-responses': normalConfig({ maxRetries: 5 }) }))
@@ -246,7 +262,7 @@ describe('provider-routed retry policy', () => {
       retry: 1,
       maxRetries: 5,
       delayMs: 500,
-      failure: { message: azureError, code: 'SERVER' },
+      failure: { message: azureError, code: 'SERVER', classificationSource: 'pi-ai-error-message' },
     })
 
     const secondRetry = waitForRetry(context, agent, 2)

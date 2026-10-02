@@ -1077,6 +1077,10 @@ describe('headless recorded-session snapshots', () => {
       || mode === 'record' && scenario.manifest.recording === 'authored'
       || mode === 'record' && scenario.manifest.sessionFormat !== undefined
     const scenarioTest = skipped ? it.skip : mode === 'replay' ? it.concurrent : it
+    // This cold source-loader case needs 60s for the child; leave 30s for timeout handling and cleanup.
+    const scenarioTestTimeoutMs = scenario.name === 'provider-cwd'
+      ? 3 * LOADER_SMOKE_TEST_TIMEOUT_MS
+      : scenario.name === 'status-free-server-error-retry' ? 90_000 : LOADER_SMOKE_TEST_TIMEOUT_MS
     const inputLabel = retainedToolInput === undefined ? '' : ' from retained V3 input'
     scenarioTest(`${mode}s ${scenario.name}${inputLabel} through dsh --profile headless`, async () => {
       let fixtureFiles = retainedToolInput === undefined
@@ -1118,6 +1122,8 @@ describe('headless recorded-session snapshots', () => {
       try {
         result = await runLoaderSmoke({
           label: `${scenario.name} headless snapshot`,
+          // A cold source-loader replay exceeded 30s on Windows; keep the child deadline finite.
+          ...(scenario.name === 'status-free-server-error-retry' ? { processTimeoutMs: 60_000 } : {}),
           tempDirPrefix: 'dsh-log-snap-',
           ...(scenario.manifest.workspace?.parent === 'outside-temp' ? { tempDirParent: outsideTempWorkspaceParent() } : {}),
           binScript: dshBin,
@@ -1276,6 +1282,6 @@ describe('headless recorded-session snapshots', () => {
       } else {
         expect(finalWorkspace, `${scenario.name}: a changed workspace requires workspace.final`).toEqual(initialWorkspace)
       }
-    }, scenario.name === 'provider-cwd' ? 3 * LOADER_SMOKE_TEST_TIMEOUT_MS : LOADER_SMOKE_TEST_TIMEOUT_MS)
+    }, scenarioTestTimeoutMs)
   }
 })

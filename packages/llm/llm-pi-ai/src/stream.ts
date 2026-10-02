@@ -127,7 +127,15 @@ export function mapStopReason(message: AssistantMessage, contextWindow?: number)
     }
     case 'error': {
       const text = message.errorMessage ?? 'pi-ai stream error'
-      return { kind: 'error', failure: { message: text, code: classifyPiAiError(text) } }
+      const code = classifyPiAiError(text)
+      return {
+        kind: 'error',
+        failure: {
+          message: text,
+          code,
+          ...code === 'SERVER' ? { classificationSource: 'pi-ai-error-message' } : {},
+        },
+      }
     }
   }
 }

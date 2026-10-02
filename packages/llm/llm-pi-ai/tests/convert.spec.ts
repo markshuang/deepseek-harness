@@ -883,7 +883,7 @@ describe('mapStopReason / mapUsage', () => {
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'HTTP 500: backend down' })))
       .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
     expect(mapStopReason(assistant({ stopReason: 'error', errorMessage: 'The server had an error processing your request' })))
-      .toMatchObject({ kind: 'error', failure: { code: 'SERVER' } })
+      .toMatchObject({ kind: 'error', failure: { code: 'SERVER', classificationSource: 'pi-ai-error-message' } })
     for (const errorMessage of [
       'Internal Server Error',
       'Service Unavailable',

@@ -427,6 +427,7 @@ describe('LlmRuntime', () => {
 
   it('preserves structured LlmError facts in the terminal failure', async () => {
     const failure = new LlmError('provider busy', 'RATE_LIMIT', {
+      classificationSource: 'pi-ai-error-message',
       status: 429,
       providerRetryAfterMs: 1_500,
       requestId: ProviderRequestId('req-7'),
@@ -448,6 +449,7 @@ describe('LlmRuntime', () => {
         failure: {
           message: 'provider busy',
           code: 'RATE_LIMIT',
+          classificationSource: 'pi-ai-error-message',
           status: 429,
           providerRetryAfterMs: 1_500,
           requestId: ProviderRequestId('req-7'),
@@ -1353,6 +1355,7 @@ describe('LlmRuntime', () => {
 
   it('rejects non-serializable structured failure facts at construction', () => {
     expect(() => new LlmError('busy', 'RATE_LIMIT', { status: 42 })).toThrow(/status/)
+    expect(() => new LlmError('busy', 'RATE_LIMIT', { classificationSource: '' })).toThrow(/classificationSource/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { providerRetryAfterMs: Number.NaN }))
       .toThrow(/providerRetryAfterMs/)
     expect(() => new LlmError('busy', 'RATE_LIMIT', { requestId: ProviderRequestId('') })).toThrow(/requestId/)
